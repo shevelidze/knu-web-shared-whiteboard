@@ -1,4 +1,3 @@
-import { useRef, useState, useEffect } from "react";
 import {
   Box,
   Button,
@@ -11,12 +10,19 @@ import {
   HStack,
   Input,
   Stack,
+  Switch,
+  Text,
 } from "@chakra-ui/react";
-import { io } from "socket.io-client";
+import { useEffect, useRef, useState } from "react";
 import { SliderPicker } from "react-color";
+import { io } from "socket.io-client";
+import { LongPollIO } from "./longPollIO";
+import { Clock } from "./Clock";
 
 const API_URL = "http://localhost:8000";
 const SOCKET_URL = "http://localhost:5000";
+const POLL_URL = "http://localhost:8000/poll";
+const EMIT_URL = "http://localhost:8000/emit";
 
 function getCursorPositionInElement(event) {
   const clientRect = event.target.getBoundingClientRect();
@@ -34,11 +40,13 @@ function App() {
     useState(false);
   const [boardData, setBoardData] = useState(null);
   const [color, setColor] = useState("#000000");
+  const [isLongPollUsed, setIsLongPollUsed] = useState(false);
 
   const canvasElementRef = useRef();
   const pencilImageRef = useRef();
   const clearButtonRef = useRef();
   const colorRef = useRef(color);
+  const clockRef = useRef(new Clock(40));
 
   const handleUsernameChange = (event) => setUsername(event.target.value);
 
@@ -71,64 +79,81 @@ function App() {
     const canvasElement = canvasElementRef.current;
     const clearButtonElement = clearButtonRef.current;
     const socketIO = io(SOCKET_URL);
+    const longPollIO = new LongPollIO(EMIT_URL, POLL_URL);
+
+    const currentIO = isLongPollUsed ? longPollIO : socketIO;
+
+    if (isLongPollUsed) {
+      longPollIO.poll();
+    }
 
     const updateBoardData = ({ lines, pencils }) => {
-      setBoardData((boardData) => {
-        const filteredLines = boardData.lines.filter(
-          (oldLine) => !lines.find((newLine) => newLine.id === oldLine.id)
-        );
-        return { lines: [...filteredLines, ...lines], pencils };
+      clockRef.current.tick(() => {
+        setBoardData((boardData) => {
+          const filteredLines = boardData.lines.filter(
+            (oldLine) => !lines.find((newLine) => newLine.id === oldLine.id)
+          );
+          return { lines: [...filteredLines, ...lines], pencils };
+        });
       });
     };
 
     const clearBoard = () => {
-      console.log("clear");
       setBoardData((boardData) => {
         return { lines: [], pencils: boardData.pencils };
       });
     };
 
-    socketIO.on("update", updateBoardData);
-    socketIO.on("clear", clearBoard);
+    currentIO.on("update", updateBoardData);
+    currentIO.on("clear", clearBoard);
 
     const handleMoveEvent = (event) => {
-      socketIO.emit("move", {
+      currentIO.emit("move", {
         position: getCursorPositionInElement(event),
         username,
       });
     };
 
     const handleDownEvent = (event) => {
-      socketIO.emit("down", {
+      currentIO.emit("down", {
         position: getCursorPositionInElement(event),
         color: colorRef.current,
+        username,
       });
     };
 
     const handleUpEvent = () => {
-      socketIO.emit("up");
+      currentIO.emit("up", { username });
     };
 
     const handleClear = () => {
-      socketIO.emit("clear");
+      currentIO.emit("clear");
+    };
+
+    const handleLeaveEvent = () => {
+      currentIO.emit("leave", { username });
     };
 
     canvasElement.addEventListener("mousemove", handleMoveEvent);
     canvasElement.addEventListener("mouseenter", handleMoveEvent);
     canvasElement.addEventListener("mousedown", handleDownEvent);
     canvasElement.addEventListener("mouseup", handleUpEvent);
-    canvasElement.addEventListener("mouseleave", handleUpEvent);
+    canvasElement.addEventListener("mouseleave", handleLeaveEvent);
     clearButtonElement.addEventListener("click", handleClear);
 
     return () => {
+      currentIO.emit("leave", { username });
+
       canvasElement.removeEventListener("mousemove", handleMoveEvent);
       canvasElement.removeEventListener("mouseenter", handleMoveEvent);
       canvasElement.removeEventListener("mousedown", handleDownEvent);
       canvasElement.removeEventListener("mouseup", handleUpEvent);
       canvasElement.removeEventListener("mouseleave", handleUpEvent);
       clearButtonElement.removeEventListener("click", handleClear);
+
+      longPollIO.stopPolling();
     };
-  }, [initialBoardDataIsLoaded, username]);
+  }, [initialBoardDataIsLoaded, username, isLongPollUsed]);
 
   useEffect(() => {
     if (!boardData) {
@@ -148,6 +173,7 @@ function App() {
       for (const point of line.points) {
         drawingContext.beginPath();
         drawingContext.lineWidth = 5;
+        drawingContext.lineCap = "round";
         drawingContext.moveTo(lastPoint.x, lastPoint.y);
         drawingContext.lineTo(point.x, point.y);
         drawingContext.stroke();
@@ -175,8 +201,6 @@ function App() {
         pencil.position.y
       );
     }
-
-    console.log(boardData);
   }, [boardData]);
 
   return (
@@ -187,12 +211,22 @@ function App() {
             <Stack>
               <Card>
                 <CardBody>
-                  <canvas
-                    width={800}
-                    height={600}
-                    ref={canvasElementRef}
-                    style={{ cursor: "none" }}
-                  />
+                  <Flex flexDirection="column">
+                    <Flex gap="1" alignItems="center">
+                      <Text>Websocket</Text>
+                      <Switch
+                        isChecked={isLongPollUsed}
+                        onChange={() => setIsLongPollUsed(!isLongPollUsed)}
+                      />
+                      <Text>Long poll</Text>
+                    </Flex>
+                    <canvas
+                      width={800}
+                      height={600}
+                      ref={canvasElementRef}
+                      style={{ cursor: "none" }}
+                    />
+                  </Flex>
                 </CardBody>
                 <CardFooter>
                   <HStack>
